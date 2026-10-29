@@ -11,18 +11,30 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
-// 1. INICIALIZAÇÃO DO FIREBASE ADMIN SDK VIA ARQUIVO JSON
+// 1. INICIALIZAÇÃO DO FIREBASE ADMIN SDK
 let db = null;
 
 try {
-  const serviceAccount = require('./serviceAccountKey.json');
+  let serviceAccount;
+  
+  // Se existir a variável de ambiente (no Render), usa ela
+  if (process.env.FIREBASE_SERVICE_ACCOUNT) {
+    serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT);
+    console.log('☁️ Firebase carregado via Variável de Ambiente (Render)');
+  } else {
+    // Se não existir (no seu PC), carrega o arquivo físico
+    serviceAccount = require('./serviceAccountKey.json');
+    console.log('💻 Firebase carregado via arquivo local');
+  }
+
   admin.initializeApp({
     credential: admin.credential.cert(serviceAccount)
   });
+  
   db = admin.firestore();
-  console.log('✅ Firebase Admin SDK inicializado com sucesso via serviceAccountKey.json!');
+  console.log('✅ Firebase Admin SDK conectado com sucesso à base de dados!');
 } catch (err) {
-  console.error('❌ Erro ao carregar o serviceAccountKey.json:', err.message);
+  console.error('❌ Erro ao inicializar o Firebase Admin:', err.message);
 }
 // 2. INICIALIZAÇÃO DO MERCADO PAGO SDK
 const accessTokenEnv = process.env.MERCADOPAGO_ACCESS_TOKEN ? process.env.MERCADOPAGO_ACCESS_TOKEN.trim() : '';
