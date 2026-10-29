@@ -7,24 +7,23 @@ const { MercadoPagoConfig, Payment } = require('mercadopago');
 dotenv.config();
 
 const app = express();
-
 app.use(cors());
 app.use(express.json());
 
-// 1. INICIALIZAÇÃO DO FIREBASE ADMIN SDK
+// 1. INICIALIZAÇÃO PROFISSIONAL DO FIREBASE
 let db = null;
 
 try {
   let serviceAccount;
   
-  // Se existir a variável de ambiente (no Render), usa ela
   if (process.env.FIREBASE_SERVICE_ACCOUNT) {
+    // Lê a credencial na nuvem (Render)
     serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT);
-    console.log('☁️ Firebase carregado via Variável de Ambiente (Render)');
+    console.log('☁️ Firebase: Lendo credenciais da Variável de Ambiente (Render)');
   } else {
-    // Se não existir (no seu PC), carrega o arquivo físico
+    // Lê a credencial localmente no seu PC (VS Code)
     serviceAccount = require('./serviceAccountKey.json');
-    console.log('💻 Firebase carregado via arquivo local');
+    console.log('💻 Firebase: Lendo credenciais do arquivo local');
   }
 
   admin.initializeApp({
@@ -32,189 +31,143 @@ try {
   });
   
   db = admin.firestore();
-  console.log('✅ Firebase Admin SDK conectado com sucesso à base de dados!');
+  console.log('✅ Firebase Firestore conectado com sucesso!');
 } catch (err) {
-  console.error('❌ Erro ao inicializar o Firebase Admin:', err.message);
+  console.error('❌ ERRO CRÍTICO: Não foi possível conectar ao Firebase.', err.message);
 }
-// 2. INICIALIZAÇÃO DO MERCADO PAGO SDK
-const accessTokenEnv = process.env.MERCADOPAGO_ACCESS_TOKEN ? process.env.MERCADOPAGO_ACCESS_TOKEN.trim() : '';
 
+// 2. INICIALIZAÇÃO DO MERCADO PAGO
+const accessTokenEnv = process.env.MERCADOPAGO_ACCESS_TOKEN ? process.env.MERCADOPAGO_ACCESS_TOKEN.trim() : '';
 const client = new MercadoPagoConfig({
   accessToken: accessTokenEnv || 'TEST-0000000000000000-000000-00000000000000000000000000000000-000000000',
   options: { timeout: 10000 }
 });
-
 const paymentClient = new Payment(client);
 
-// MIDDLEWARE DE AUTENTICAÇÃO DO USUÁRIO
-async function authenticateUser(req, res, next) {
-  const authHeader = req.headers.authorization;
-  if (!authHeader || !authHeader.startsWith('Bearer ')) {
-    req.user = null;
-    return next();
-  }
-
-  const token = authHeader.split('Bearer ')[1];
-  try {
-    if (admin.apps.length) {
-      const decodedToken = await admin.auth().verifyIdToken(token);
-      req.user = decodedToken;
-    } else {
-      req.user = { uid: 'guest_user' };
-    }
-    next();
-  } catch (error) {
-    console.error('Erro na verificação do token Firebase:', error);
-    return res.status(401).json({ error: 'Sessão inválida ou token expirado.' });
-  }
-}
-
-// ROTA 1: CRIAR PAGAMENTO VIA PIX (Salvando no Firestore)
-app.post('/api/payments/pix', authenticateUser, async (req, res) => {
+// ROTA 1: PIX
+app.post('/api/payments/pix', async (req, res) => {
   try {
     const { items, payer, shippingAddress } = req.body;
-
-    if (!items || !items.length || !payer || !payer.email || !payer.identification) {
-      return res.status(400).json({ error: 'Dados insuficientes para gerar o PIX (items e dados do pagador são obrigatórios).' });
+    
+    if (!db) {
+      console.error('❌ Venda Bloqueada: Banco de dados inativo.');
+      return res.status(500).json({ error: 'Erro interno: Banco de dados desconectado.' });
     }
 
     const totalAmount = items.reduce((acc, item) => acc + (parseFloat(item.price) * parseInt(item.quantity)), 0);
-
     let orderId = 'ORD-' + Date.now();
 
-    // Salva o pedido pendente no Firestore
-    if (db) {
-      try {
-        const orderRef = await db.collection('orders').add({
-          userId: req.user ? req.user.uid : 'guest',
-          payer: {
-            name: payer.first_name + ' ' + (payer.last_name || ''),
-            email: payer.email,
-            cpf: payer.identification ? payer.identification.number : '',
-            address: payer.address || shippingAddress || null
-          },
-          items,
-          totalAmount,
-          paymentMethod: 'pix',
-          status: 'Pendente',
-          createdAt: admin.firestore.FieldValue.serverTimestamp()
-        });
-        orderId = orderRef.id;
-        console.log(`📦 Pedido ${orderId} salvo com sucesso no Firestore.`);
-      } catch (firestoreErr) {
-        console.error('❌ Erro ao salvar no Firestore:', firestoreErr.message);
-      }
-    }
-
-    // Configuração do pagamento via PIX no Mercado Pago (Modo Simulado / Fallback se o token falhar)
-    let paymentResponse;
+    // 1º PASSO OBRIGATÓRIO: Salvar no Firebase ANTES de cobrar
     try {
-      const paymentData = {
-        body: {
-          transaction_amount: Number(totalAmount.toFixed(2)),
-          description: `Pedido Malala Store #${orderId}`,
-          payment_method_id: 'pix',
-          payer: {
-            email: payer.email,
-            first_name: payer.first_name,
-            last_name: payer.last_name || 'Cliente',
-            identification: {
-              type: payer.identification.type || 'CPF',
-              number: payer.identification.number.replace(/\D/g, '')
-            }
-          },
-          external_reference: orderId,
-          notification_url: process.env.MERCADOPAGO_WEBHOOK_URL || 'https://seu-dominio.com/api/payments/webhook'
-        }
-      };
-      paymentResponse = await paymentClient.create(paymentData);
-    } catch (mpError) {
-      console.warn('⚠️ Falha na API do Mercado Pago. Gerando dados de PIX simulados para homologação local...');
-      paymentResponse = {
-        id: Math.floor(1000000 + Math.random() * 9000000),
-        status: 'pending',
-        point_of_interaction: {
-          transaction_data: {
-            qr_code_base64: 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==',
-            qr_code: `00020126580014BR.GOV.BCB.PIX0136malalastore-teste-${orderId}5204000053039865405${totalAmount.toFixed(2)}5802BR5912MALALA_STORE6009RIO_DE_JANEIRO62070503***63041C3B`,
-            ticket_url: 'https://www.mercadopago.com.br'
-          }
-        }
-      };
+      const orderRef = await db.collection('orders').add({
+        payer: {
+          name: payer.first_name + ' ' + (payer.last_name || ''),
+          email: payer.email,
+          cpf: payer.identification ? payer.identification.number : '',
+          address: payer.address || shippingAddress || null
+        },
+        items,
+        totalAmount,
+        paymentMethod: 'pix',
+        status: 'Pendente',
+        createdAt: admin.firestore.FieldValue.serverTimestamp()
+      });
+      orderId = orderRef.id;
+      console.log(`📦 [PIX] Pedido ${orderId} salvo no Firestore com sucesso!`);
+    } catch (dbError) {
+      console.error('❌ Erro ao salvar pedido PIX no Firestore:', dbError);
+      return res.status(500).json({ error: 'Falha ao registrar pedido no banco de dados.' });
     }
 
+    // 2º PASSO: Gerar a cobrança no Mercado Pago
+    const paymentData = {
+      body: {
+        transaction_amount: Number(totalAmount.toFixed(2)),
+        description: `Pedido Malala Store #${orderId}`,
+        payment_method_id: 'pix',
+        payer: {
+          email: payer.email,
+          first_name: payer.first_name,
+          last_name: payer.last_name || 'Cliente',
+          identification: {
+            type: payer.identification.type || 'CPF',
+            number: payer.identification.number.replace(/\D/g, '')
+          }
+        },
+        external_reference: orderId
+      }
+    };
+
+    const paymentResponse = await paymentClient.create(paymentData);
     const pixInfo = paymentResponse.point_of_interaction.transaction_data;
 
-    // Atualiza o pedido no Firestore com os dados do PIX gerado
-    if (db && orderId) {
-      try {
-        await db.collection('orders').doc(orderId).update({
-          mercadoPagoId: paymentResponse.id,
-          pixQrCodeBase64: pixInfo.qr_code_base64,
-          pixCopyPaste: pixInfo.qr_code,
-          pixTicketUrl: pixInfo.ticket_url
-        });
-      } catch (e) {}
-    }
+    // 3º PASSO: Atualizar o Firebase com o QR Code
+    await db.collection('orders').doc(orderId).update({
+      mercadoPagoId: paymentResponse.id,
+      pixQrCodeBase64: pixInfo.qr_code_base64,
+      pixCopyPaste: pixInfo.qr_code
+    });
 
     res.status(200).json({
       success: true,
       orderId: orderId,
-      paymentId: paymentResponse.id,
-      status: paymentResponse.status,
       qrCodeBase64: pixInfo.qr_code_base64,
-      qrCodeCopyPaste: pixInfo.qr_code,
-      ticketUrl: pixInfo.ticket_url,
-      totalAmount: totalAmount
+      qrCodeCopyPaste: pixInfo.qr_code
     });
 
   } catch (error) {
-    console.error('❌ Erro ao gerar PIX:', error);
-    res.status(500).json({
-      error: 'Falha ao processar o pagamento via PIX.',
-      details: error.message || error
-    });
+    console.error('❌ Erro geral na rota PIX:', error);
+    res.status(500).json({ error: 'Falha ao processar o pagamento via PIX.' });
   }
 });
 
-// ROTA 2: PROCESSAR CARTÃO DE CRÉDITO
-app.post('/api/payments/card', authenticateUser, async (req, res) => {
+// ROTA 2: CARTÃO DE CRÉDITO
+app.post('/api/payments/card', async (req, res) => {
   try {
     const { token, issuer_id, payment_method_id, installments, payer, items } = req.body;
+    
+    if (!db) {
+      console.error('❌ Venda Bloqueada: Banco de dados inativo.');
+      return res.status(500).json({ error: 'Erro interno: Banco de dados desconectado.' });
+    }
 
     const totalAmount = items.reduce((acc, item) => acc + (parseFloat(item.price) * parseInt(item.quantity)), 0);
     let orderId = 'ORD-' + Date.now();
 
-    if (db) {
-      try {
-        const orderRef = await db.collection('orders').add({
-          userId: req.user ? req.user.uid : 'guest',
-          payer: {
-            name: payer.first_name + ' ' + (payer.last_name || ''),
-            email: payer.email,
-            cpf: payer.identification ? payer.identification.number : '',
-            address: payer.address || req.body.shippingAddress || null
-          },
-          items,
-          totalAmount,
-          paymentMethod: 'credit_card',
-          installments: parseInt(installments) || 1,
-          status: 'Pago',
-          createdAt: admin.firestore.FieldValue.serverTimestamp()
-        });
-        orderId = orderRef.id;
-      } catch (e) {}
+    // 1º PASSO OBRIGATÓRIO: Salvar no Firebase
+    try {
+      const orderRef = await db.collection('orders').add({
+        payer: {
+          name: payer.first_name + ' ' + (payer.last_name || ''),
+          email: payer.email,
+          cpf: payer.identification ? payer.identification.number : '',
+          address: payer.address || req.body.shippingAddress || null
+        },
+        items,
+        totalAmount,
+        paymentMethod: 'credit_card',
+        installments: parseInt(installments) || 1,
+        status: 'Pago',
+        createdAt: admin.firestore.FieldValue.serverTimestamp()
+      });
+      orderId = orderRef.id;
+      console.log(`📦 [CARTÃO] Pedido ${orderId} salvo no Firestore com sucesso!`);
+    } catch (dbError) {
+      console.error('❌ Erro ao salvar pedido de Cartão no Firestore:', dbError);
+      return res.status(500).json({ error: 'Falha ao registrar pedido no banco de dados.' });
     }
 
+    // (Opcional) Aqui entra a chamada real do Mercado Pago para cartão se estiver configurado no front-end
+    
     res.status(200).json({
       success: true,
       orderId: orderId,
-      paymentId: Math.floor(1000000 + Math.random() * 9000000),
-      status: 'approved',
-      statusDetail: 'accredited'
+      status: 'approved'
     });
+
   } catch (error) {
-    res.status(500).json({ error: 'Erro ao processar cartão.' });
+    console.error('❌ Erro geral na rota de Cartão:', error);
+    res.status(500).json({ error: 'Falha ao processar cartão de crédito.' });
   }
 });
 
