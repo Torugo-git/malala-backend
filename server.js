@@ -83,27 +83,31 @@ app.post('/api/payments/pix', authenticateUser, async (req, res) => {
     let orderId = 'ORD-' + Date.now();
 
     // Salva o pedido pendente no Firestore
-    if (db) {
-      try {
-        const orderRef = await db.collection('orders').add({
-          userId: req.user ? req.user.uid : 'guest',
-          payer: {
-            name: payer.first_name + ' ' + (payer.last_name || ''),
-            email: payer.email,
-            cpf: payer.identification ? payer.identification.number : '',
-            address: payer.address || shippingAddress || null
-          },
-          items,
-          totalAmount,
-          paymentMethod: 'pix',
-          status: 'Pendente',
-          createdAt: admin.firestore.FieldValue.serverTimestamp()
-        });
-        orderId = orderRef.id;
-        console.log(`📦 Pedido ${orderId} salvo com sucesso no Firestore.`);
-      } catch (firestoreErr) {
-        console.error('❌ Erro ao salvar no Firestore:', firestoreErr.message);
-      }
+    if (!db) {
+      console.error('❌ Erro: O banco de dados (db) não foi inicializado corretamente.');
+      return res.status(500).json({ error: 'Erro ao salvar pedido no banco de dados' });
+    }
+
+    try {
+      const orderRef = await db.collection('orders').add({
+        userId: req.user ? req.user.uid : 'guest',
+        payer: {
+          name: payer.first_name + ' ' + (payer.last_name || ''),
+          email: payer.email,
+          cpf: payer.identification ? payer.identification.number : '',
+          address: payer.address || shippingAddress || null
+        },
+        items,
+        totalAmount,
+        paymentMethod: 'pix',
+        status: 'Pendente',
+        createdAt: admin.firestore.FieldValue.serverTimestamp()
+      });
+      orderId = orderRef.id;
+      console.log(`✅ Sucesso: Pedido ${orderId} salvo no Firestore com sucesso.`);
+    } catch (firestoreErr) {
+      console.error('❌ Erro ao salvar pedido no Firestore (PIX):', firestoreErr);
+      return res.status(500).json({ error: 'Erro ao salvar pedido no banco de dados' });
     }
 
     // Configuração do pagamento via PIX no Mercado Pago (Modo Simulado / Fallback se o token falhar)
@@ -146,15 +150,17 @@ app.post('/api/payments/pix', authenticateUser, async (req, res) => {
     const pixInfo = paymentResponse.point_of_interaction.transaction_data;
 
     // Atualiza o pedido no Firestore com os dados do PIX gerado
-    if (db && orderId) {
-      try {
-        await db.collection('orders').doc(orderId).update({
-          mercadoPagoId: paymentResponse.id,
-          pixQrCodeBase64: pixInfo.qr_code_base64,
-          pixCopyPaste: pixInfo.qr_code,
-          pixTicketUrl: pixInfo.ticket_url
-        });
-      } catch (e) {}
+    try {
+      await db.collection('orders').doc(orderId).update({
+        mercadoPagoId: paymentResponse.id,
+        pixQrCodeBase64: pixInfo.qr_code_base64,
+        pixCopyPaste: pixInfo.qr_code,
+        pixTicketUrl: pixInfo.ticket_url
+      });
+      console.log(`✅ Sucesso: Pedido ${orderId} atualizado com dados do PIX no Firestore.`);
+    } catch (updateErr) {
+      console.error(`❌ Erro ao atualizar pedido ${orderId} com PIX no Firestore:`, updateErr);
+      return res.status(500).json({ error: 'Erro ao salvar pedido no banco de dados' });
     }
 
     res.status(200).json({
@@ -185,25 +191,32 @@ app.post('/api/payments/card', authenticateUser, async (req, res) => {
     const totalAmount = items.reduce((acc, item) => acc + (parseFloat(item.price) * parseInt(item.quantity)), 0);
     let orderId = 'ORD-' + Date.now();
 
-    if (db) {
-      try {
-        const orderRef = await db.collection('orders').add({
-          userId: req.user ? req.user.uid : 'guest',
-          payer: {
-            name: payer.first_name + ' ' + (payer.last_name || ''),
-            email: payer.email,
-            cpf: payer.identification ? payer.identification.number : '',
-            address: payer.address || req.body.shippingAddress || null
-          },
-          items,
-          totalAmount,
-          paymentMethod: 'credit_card',
-          installments: parseInt(installments) || 1,
-          status: 'Pago',
-          createdAt: admin.firestore.FieldValue.serverTimestamp()
-        });
-        orderId = orderRef.id;
-      } catch (e) {}
+    if (!db) {
+      console.error('❌ Erro: O banco de dados (db) não foi inicializado corretamente.');
+      return res.status(500).json({ error: 'Erro ao salvar pedido no banco de dados' });
+    }
+
+    try {
+      const orderRef = await db.collection('orders').add({
+        userId: req.user ? req.user.uid : 'guest',
+        payer: {
+          name: payer.first_name + ' ' + (payer.last_name || ''),
+          email: payer.email,
+          cpf: payer.identification ? payer.identification.number : '',
+          address: payer.address || req.body.shippingAddress || null
+        },
+        items,
+        totalAmount,
+        paymentMethod: 'credit_card',
+        installments: parseInt(installments) || 1,
+        status: 'Pago',
+        createdAt: admin.firestore.FieldValue.serverTimestamp()
+      });
+      orderId = orderRef.id;
+      console.log(`✅ Sucesso: Pedido ${orderId} salvo no Firestore com sucesso.`);
+    } catch (firestoreErr) {
+      console.error('❌ Erro ao salvar pedido no Firestore (Cartão):', firestoreErr);
+      return res.status(500).json({ error: 'Erro ao salvar pedido no banco de dados' });
     }
 
     res.status(200).json({
