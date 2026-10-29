@@ -1,7 +1,8 @@
 const express = require('express');
 const cors = require('cors');
 const dotenv = require('dotenv');
-const admin = require('firebase-admin');
+const { initializeApp, cert } = require('firebase-admin/app');
+const { getFirestore, FieldValue } = require('firebase-admin/firestore');
 const { MercadoPagoConfig, Payment } = require('mercadopago');
 
 dotenv.config();
@@ -10,7 +11,7 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
-// 1. INICIALIZAÇÃO PROFISSIONAL DO FIREBASE
+// 1. INICIALIZAÇÃO PROFISSIONAL DO FIREBASE (PADRÃO MODERNO V12+)
 let db = null;
 
 try {
@@ -26,11 +27,11 @@ try {
     console.log('💻 Firebase: Lendo credenciais do arquivo local');
   }
 
-  admin.initializeApp({
-    credential: admin.credential.cert(serviceAccount)
+  initializeApp({
+    credential: cert(serviceAccount)
   });
   
-  db = admin.firestore();
+  db = getFirestore();
   console.log('✅ Firebase Firestore conectado com sucesso!');
 } catch (err) {
   console.error('❌ ERRO CRÍTICO: Não foi possível conectar ao Firebase.', err.message);
@@ -70,7 +71,7 @@ app.post('/api/payments/pix', async (req, res) => {
         totalAmount,
         paymentMethod: 'pix',
         status: 'Pendente',
-        createdAt: admin.firestore.FieldValue.serverTimestamp()
+        createdAt: FieldValue.serverTimestamp()
       });
       orderId = orderRef.id;
       console.log(`📦 [PIX] Pedido ${orderId} salvo no Firestore com sucesso!`);
@@ -148,7 +149,7 @@ app.post('/api/payments/card', async (req, res) => {
         paymentMethod: 'credit_card',
         installments: parseInt(installments) || 1,
         status: 'Pago',
-        createdAt: admin.firestore.FieldValue.serverTimestamp()
+        createdAt: FieldValue.serverTimestamp()
       });
       orderId = orderRef.id;
       console.log(`📦 [CARTÃO] Pedido ${orderId} salvo no Firestore com sucesso!`);
