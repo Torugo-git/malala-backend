@@ -20,6 +20,12 @@ try {
   if (process.env.FIREBASE_SERVICE_ACCOUNT) {
     // Lê a credencial na nuvem (Render)
     serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT);
+    
+    // CORREÇÃO DA CHAVE PRIVADA: Converte os textos "\n" em quebras de linha reais
+    if (serviceAccount.private_key) {
+      serviceAccount.private_key = serviceAccount.private_key.replace(/\\n/g, '\n');
+    }
+    
     console.log('☁️ Firebase: Lendo credenciais da Variável de Ambiente (Render)');
   } else {
     // Lê a credencial localmente no seu PC (VS Code)
