@@ -11,24 +11,19 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
-// 1. INICIALIZAÇÃO PROFISSIONAL DO FIREBASE (PADRÃO MODERNO V12+)
+// 1. INICIALIZAÇÃO DO FIREBASE
 let db = null;
 
 try {
   let serviceAccount;
   
   if (process.env.FIREBASE_SERVICE_ACCOUNT) {
-    // Lê a credencial na nuvem (Render)
     serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT);
-    
-    // CORREÇÃO DA CHAVE PRIVADA: Converte os textos "\n" em quebras de linha reais
     if (serviceAccount.private_key) {
       serviceAccount.private_key = serviceAccount.private_key.replace(/\\n/g, '\n');
     }
-    
     console.log('☁️ Firebase: Lendo credenciais da Variável de Ambiente (Render)');
   } else {
-    // Lê a credencial localmente no seu PC (VS Code)
     serviceAccount = require('./serviceAccountKey.json');
     console.log('💻 Firebase: Lendo credenciais do arquivo local');
   }
@@ -51,20 +46,49 @@ const client = new MercadoPagoConfig({
 });
 const paymentClient = new Payment(client);
 
+// FUNÇÃO DE VALIDAÇÃO DUPLA DE ESTOQUE
+async function validateStockBeforeCheckout(requestedItems) {
+    if (!db) throw new Error("Banco de dados indisponível.");
+    
+    const docRef = db.collection('malala_store').doc('catalog');
+    const docSnap = await docRef.get();
+    
+    if (!docSnap.exists || !docSnap.data().products) {
+        throw new Error("Catálogo não encontrado na nuvem.");
+    }
+    
+    const catalog = docSnap.data().products;
+    
+    for (let item of requestedItems) {
+        const productInDb = catalog.find(p => String(p.id) === String(item.id));
+        if (!productInDb) {
+            return { valid: false, error: `Produto "${item.title}" não existe mais no catálogo.` };
+        }
+        if (productInDb.stock < item.quantity) {
+            return { 
+                valid: false, 
+                error: `O produto "${item.title}" esgotou ou não tem a quantidade solicitada (Estoque atual: ${productInDb.stock}).` 
+            };
+        }
+    }
+    return { valid: true };
+}
+
 // ROTA 1: PIX
 app.post('/api/payments/pix', async (req, res) => {
   try {
     const { items, payer, shippingAddress } = req.body;
-    
-    if (!db) {
-      console.error('❌ Venda Bloqueada: Banco de dados inativo.');
-      return res.status(500).json({ error: 'Erro interno: Banco de dados desconectado.' });
+    if (!db) return res.status(500).json({ error: 'Erro interno: Banco de dados desconectado.' });
+
+    const stockValidation = await validateStockBeforeCheckout(items);
+    if (!stockValidation.valid) {
+        console.warn(`⚠️ Venda PIX Bloqueada por falta de estoque: ${stockValidation.error}`);
+        return res.status(409).json({ error: stockValidation.error });
     }
 
     const totalAmount = items.reduce((acc, item) => acc + (parseFloat(item.price) * parseInt(item.quantity)), 0);
     let orderId = 'ORD-' + Date.now();
 
-    // 1º PASSO OBRIGATÓRIO: Salvar no Firebase ANTES de cobrar
     try {
       const orderRef = await db.collection('orders').add({
         payer: {
@@ -86,7 +110,9 @@ app.post('/api/payments/pix', async (req, res) => {
       return res.status(500).json({ error: 'Falha ao registrar pedido no banco de dados.' });
     }
 
-    // 2º PASSO: Gerar a cobrança no Mercado Pago
+    // A URL de Webhook é enviada aqui para o Mercado Pago saber para onde avisar
+    const backendUrl = process.env.RENDER_EXTERNAL_URL || `https://${req.get('host')}`;
+    
     const paymentData = {
       body: {
         transaction_amount: Number(totalAmount.toFixed(2)),
@@ -101,14 +127,14 @@ app.post('/api/payments/pix', async (req, res) => {
             number: payer.identification.number.replace(/\D/g, '')
           }
         },
-        external_reference: orderId
+        external_reference: orderId,
+        notification_url: `${backendUrl}/api/webhooks/mercadopago` // <--- WEBHOOK URL
       }
     };
 
     const paymentResponse = await paymentClient.create(paymentData);
     const pixInfo = paymentResponse.point_of_interaction.transaction_data;
 
-    // 3º PASSO: Atualizar o Firebase com o QR Code
     await db.collection('orders').doc(orderId).update({
       mercadoPagoId: paymentResponse.id,
       pixQrCodeBase64: pixInfo.qr_code_base64,
@@ -132,16 +158,17 @@ app.post('/api/payments/pix', async (req, res) => {
 app.post('/api/payments/card', async (req, res) => {
   try {
     const { token, issuer_id, payment_method_id, installments, payer, items } = req.body;
-    
-    if (!db) {
-      console.error('❌ Venda Bloqueada: Banco de dados inativo.');
-      return res.status(500).json({ error: 'Erro interno: Banco de dados desconectado.' });
+    if (!db) return res.status(500).json({ error: 'Erro interno: Banco de dados desconectado.' });
+
+    const stockValidation = await validateStockBeforeCheckout(items);
+    if (!stockValidation.valid) {
+        console.warn(`⚠️ Venda de Cartão Bloqueada por falta de estoque: ${stockValidation.error}`);
+        return res.status(409).json({ error: stockValidation.error });
     }
 
     const totalAmount = items.reduce((acc, item) => acc + (parseFloat(item.price) * parseInt(item.quantity)), 0);
     let orderId = 'ORD-' + Date.now();
 
-    // 1º PASSO OBRIGATÓRIO: Salvar no Firebase
     try {
       const orderRef = await db.collection('orders').add({
         payer: {
@@ -160,21 +187,86 @@ app.post('/api/payments/card', async (req, res) => {
       orderId = orderRef.id;
       console.log(`📦 [CARTÃO] Pedido ${orderId} salvo no Firestore com sucesso!`);
     } catch (dbError) {
-      console.error('❌ Erro ao salvar pedido de Cartão no Firestore:', dbError);
       return res.status(500).json({ error: 'Falha ao registrar pedido no banco de dados.' });
     }
 
-    // (Opcional) Aqui entra a chamada real do Mercado Pago para cartão se estiver configurado no front-end
-    
-    res.status(200).json({
-      success: true,
-      orderId: orderId,
-      status: 'approved'
-    });
-
+    res.status(200).json({ success: true, orderId: orderId, status: 'approved' });
   } catch (error) {
     console.error('❌ Erro geral na rota de Cartão:', error);
     res.status(500).json({ error: 'Falha ao processar cartão de crédito.' });
+  }
+});
+
+// ROTA 3: WEBHOOK MERCADO PAGO (NOVA INTELIGÊNCIA)
+app.post('/api/webhooks/mercadopago', async (req, res) => {
+  // O Mercado Pago exige resposta rápida (200 OK) para não bloquear envios
+  res.status(200).send('OK');
+
+  try {
+    const { type, data } = req.body;
+    
+    // Verifica se é uma notificação de pagamento
+    if (type === 'payment' && data && data.id) {
+      const paymentId = data.id;
+      
+      // Busca a informação real do pagamento no Mercado Pago
+      const paymentInfo = await paymentClient.get({ id: paymentId });
+      
+      const orderId = paymentInfo.external_reference;
+      const status = paymentInfo.status; // Ex: 'approved', 'pending', 'rejected'
+
+      if (!orderId || !db) return;
+
+      const orderRef = db.collection('orders').doc(orderId);
+      const orderSnap = await orderRef.get();
+
+      if (orderSnap.exists) {
+        const orderData = orderSnap.data();
+        
+        // Se foi aprovado e a encomenda ainda não estava "Pago"
+        if (status === 'approved' && orderData.status !== 'Pago') {
+          await orderRef.update({
+            status: 'Pago',
+            updatedAt: FieldValue.serverTimestamp()
+          });
+
+          // Baixar o stock automaticamente no catálogo
+          const catalogRef = db.collection('malala_store').doc('catalog');
+          const catalogSnap = await catalogRef.get();
+          
+          if (catalogSnap.exists && catalogSnap.data().products) {
+            let catProducts = catalogSnap.data().products;
+            let changed = false;
+
+            orderData.items.forEach(item => {
+              const p = catProducts.find(x => String(x.id) === String(item.id));
+              if (p && p.stock !== undefined) {
+                p.stock = Math.max(0, p.stock - item.quantity);
+                changed = true;
+              }
+            });
+
+            if (changed) {
+              await catalogRef.update({
+                products: catProducts,
+                updatedAt: FieldValue.serverTimestamp()
+              });
+              console.log(`✅ [WEBHOOK] Pedido ${orderId} aprovado e stock reduzido!`);
+            }
+          }
+        } 
+        // Se o pagamento for cancelado ou expirar o PIX
+        else if (status === 'cancelled' || status === 'rejected') {
+           await orderRef.update({
+            status: 'Cancelado',
+            updatedAt: FieldValue.serverTimestamp()
+          });
+          console.log(`❌ [WEBHOOK] Pedido ${orderId} atualizado para Cancelado.`);
+        }
+      }
+    }
+  } catch (error) {
+    console.error('❌ Erro no processamento do Webhook:', error);
   }
 });
 
