@@ -4,12 +4,22 @@ const dotenv = require('dotenv');
 const { initializeApp, cert } = require('firebase-admin/app');
 const { getFirestore, FieldValue } = require('firebase-admin/firestore');
 const { MercadoPagoConfig, Payment } = require('mercadopago');
+const nodemailer = require('nodemailer');
 
 dotenv.config();
 
 const app = express();
 app.use(cors());
 app.use(express.json());
+
+// 0. CONFIGURAÇÃO DO CARTEIRO (NODEMAILER)
+const transporter = nodemailer.createTransport({
+  service: 'gmail',
+  auth: {
+    user: process.env.EMAIL_USER,
+    pass: process.env.EMAIL_PASS
+  }
+});
 
 // 1. INICIALIZAÇÃO DO FIREBASE
 let db = null;
@@ -74,6 +84,39 @@ async function validateStockBeforeCheckout(requestedItems) {
     return { valid: true };
 }
 
+// FUNÇÃO DE ENVIO DE E-MAIL
+async function enviarEmailConfirmacao(emailCliente, idPedido, itens) {
+  try {
+    const listaProdutos = itens.map(item => `<li><b>${item.quantity}x</b> ${item.title}</li>`).join('');
+    
+    const mailOptions = {
+      from: `"Malala Store" <${process.env.EMAIL_USER}>`,
+      to: emailCliente,
+      subject: `🛒 Confirmação do Pedido #${idPedido} - Malala Store`,
+      html: `
+        <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px; border: 1px solid #eaeaea; border-radius: 10px;">
+          <h2 style="color: #1a1a1a;">Obrigado pela tua compra! 🎉</h2>
+          <p style="color: #4a4a4a; font-size: 16px;">O teu pagamento foi aprovado e o pedido <b>#${idPedido}</b> já está a ser preparado pela nossa equipa.</p>
+          <div style="background-color: #f9f9f9; padding: 15px; border-radius: 8px; margin: 20px 0;">
+            <h3 style="margin-top: 0; color: #1a1a1a;">Resumo da Encomenda:</h3>
+            <ul style="color: #4a4a4a; padding-left: 20px;">
+              ${listaProdutos}
+            </ul>
+          </div>
+          <p style="color: #4a4a4a;">Qualquer dúvida, basta responderes a este e-mail.</p>
+          <hr style="border: none; border-top: 1px solid #eaeaea; margin: 20px 0;">
+          <p style="color: #888; font-size: 12px; text-align: center;">Com carinho,<br><b>Equipa Malala Store</b></p>
+        </div>
+      `
+    };
+
+    await transporter.sendMail(mailOptions);
+    console.log(`✉️ E-mail enviado com sucesso para ${emailCliente}`);
+  } catch (error) {
+    console.error("❌ Erro ao enviar e-mail:", error);
+  }
+}
+
 // ROTA 1: PIX
 app.post('/api/payments/pix', async (req, res) => {
   try {
@@ -110,7 +153,6 @@ app.post('/api/payments/pix', async (req, res) => {
       return res.status(500).json({ error: 'Falha ao registrar pedido no banco de dados.' });
     }
 
-    // A URL de Webhook é enviada aqui para o Mercado Pago saber para onde avisar
     const backendUrl = process.env.RENDER_EXTERNAL_URL || `https://${req.get('host')}`;
     
     const paymentData = {
@@ -128,7 +170,7 @@ app.post('/api/payments/pix', async (req, res) => {
           }
         },
         external_reference: orderId,
-        notification_url: `${backendUrl}/api/webhooks/mercadopago` // <--- WEBHOOK URL
+        notification_url: `${backendUrl}/api/webhooks/mercadopago`
       }
     };
 
@@ -197,23 +239,19 @@ app.post('/api/payments/card', async (req, res) => {
   }
 });
 
-// ROTA 3: WEBHOOK MERCADO PAGO (NOVA INTELIGÊNCIA)
+// ROTA 3: WEBHOOK MERCADO PAGO
 app.post('/api/webhooks/mercadopago', async (req, res) => {
-  // O Mercado Pago exige resposta rápida (200 OK) para não bloquear envios
   res.status(200).send('OK');
 
   try {
     const { type, data } = req.body;
     
-    // Verifica se é uma notificação de pagamento
     if (type === 'payment' && data && data.id) {
       const paymentId = data.id;
-      
-      // Busca a informação real do pagamento no Mercado Pago
       const paymentInfo = await paymentClient.get({ id: paymentId });
       
       const orderId = paymentInfo.external_reference;
-      const status = paymentInfo.status; // Ex: 'approved', 'pending', 'rejected'
+      const status = paymentInfo.status;
 
       if (!orderId || !db) return;
 
@@ -223,14 +261,12 @@ app.post('/api/webhooks/mercadopago', async (req, res) => {
       if (orderSnap.exists) {
         const orderData = orderSnap.data();
         
-        // Se foi aprovado e a encomenda ainda não estava "Pago"
         if (status === 'approved' && orderData.status !== 'Pago') {
           await orderRef.update({
             status: 'Pago',
             updatedAt: FieldValue.serverTimestamp()
           });
 
-          // Baixar o stock automaticamente no catálogo
           const catalogRef = db.collection('malala_store').doc('catalog');
           const catalogSnap = await catalogRef.get();
           
@@ -254,9 +290,13 @@ app.post('/api/webhooks/mercadopago', async (req, res) => {
               console.log(`✅ [WEBHOOK] Pedido ${orderId} aprovado e stock reduzido!`);
             }
           }
-        } 
-        // Se o pagamento for cancelado ou expirar o PIX
-        else if (status === 'cancelled' || status === 'rejected') {
+
+          // Dispara o e-mail de confirmação para o cliente após aprovação e baixa de stock
+          if (orderData.payer && orderData.payer.email) {
+            await enviarEmailConfirmacao(orderData.payer.email, orderId, orderData.items);
+          }
+
+        } else if (status === 'cancelled' || status === 'rejected') {
            await orderRef.update({
             status: 'Cancelado',
             updatedAt: FieldValue.serverTimestamp()
