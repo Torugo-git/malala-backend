@@ -1,29 +1,30 @@
 {
-  "name": "server",
+  "name": "malala-store-backend",
   "version": "1.0.0",
-  "description": "",
-  "main": "server.js",
+  "description": "Backend Node.js para Malala Store com Firebase Admin SDK e Mercado Pago Payments API",
+  "main": "server/server.js",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1",
-    "start": "node server.js"
+    "start": "node server/server.js",
+    "dev": "nodemon server/server.js"
   },
-  "repository": {
-    "type": "git",
-    "url": "git+https://github.com/Torugo-git/malala-backend.git"
-  },
-  "keywords": [],
-  "author": "",
-  "license": "ISC",
-  "type": "commonjs",
-  "bugs": {
-    "url": "https://github.com/Torugo-git/malala-backend/issues"
-  },
-  "homepage": "https://github.com/Torugo-git/malala-backend#readme",
+  "keywords": [
+    "malala-store",
+    "mercado-pago",
+    "firebase",
+    "pix",
+    "ecommerce"
+  ],
+  "author": "Malala Store",
+  "license": "MIT",
   "dependencies": {
-    "cors": "^2.8.6",
-    "dotenv": "^18.0.9",
-    "express": "^5.3.0",
-    "firebase-admin": "^14.5.0",
-    "mercadopago": "^3.6.1"
+    "cors": "^2.8.5",
+    "dotenv": "^16.4.5",
+    "express": "^4.19.2",
+    "firebase-admin": "^12.1.0",
+    "mercadopago": "^2.0.11",
+    "nodemailer": "^6.9.14"    
+  },
+  "devDependencies": {
+    "nodemon": "^3.1.0"
   }
 }
