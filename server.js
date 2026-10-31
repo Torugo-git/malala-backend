@@ -4,24 +4,12 @@ const dotenv = require('dotenv');
 const { initializeApp, cert } = require('firebase-admin/app');
 const { getFirestore, FieldValue } = require('firebase-admin/firestore');
 const { MercadoPagoConfig, Payment } = require('mercadopago');
-const nodemailer = require('nodemailer');
 
 dotenv.config();
 
 const app = express();
 app.use(cors());
 app.use(express.json());
-
-// 0. CONFIGURAÇÃO DO CARTEIRO (NODEMAILER) - CORRIGIDO PARA EVITAR TIMEOUT
-const transporter = nodemailer.createTransport({
-  host: 'smtp.gmail.com',
-  port: 465,
-  secure: true, // Usa SSL diretamente
-  auth: {
-    user: process.env.EMAIL_USER,
-    pass: process.env.EMAIL_PASS
-  }
-});
 
 // 1. INICIALIZAÇÃO DO FIREBASE
 let db = null;
@@ -86,39 +74,6 @@ async function validateStockBeforeCheckout(requestedItems) {
     return { valid: true };
 }
 
-// FUNÇÃO DE ENVIO DE E-MAIL
-async function enviarEmailConfirmacao(emailCliente, idPedido, itens) {
-  try {
-    const listaProdutos = itens.map(item => `<li><b>${item.quantity}x</b> ${item.title}</li>`).join('');
-    
-    const mailOptions = {
-      from: `"Malala Store" <${process.env.EMAIL_USER}>`,
-      to: emailCliente,
-      subject: `🛒 Confirmação do Pedido #${idPedido} - Malala Store`,
-      html: `
-        <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px; border: 1px solid #eaeaea; border-radius: 10px;">
-          <h2 style="color: #1a1a1a;">Obrigado pela tua compra! 🎉</h2>
-          <p style="color: #4a4a4a; font-size: 16px;">O teu pagamento foi aprovado e o pedido <b>#${idPedido}</b> já está a ser preparado pela nossa equipa.</p>
-          <div style="background-color: #f9f9f9; padding: 15px; border-radius: 8px; margin: 20px 0;">
-            <h3 style="margin-top: 0; color: #1a1a1a;">Resumo da Encomenda:</h3>
-            <ul style="color: #4a4a4a; padding-left: 20px;">
-              ${listaProdutos}
-            </ul>
-          </div>
-          <p style="color: #4a4a4a;">Qualquer dúvida, basta responderes a este e-mail.</p>
-          <hr style="border: none; border-top: 1px solid #eaeaea; margin: 20px 0;">
-          <p style="color: #888; font-size: 12px; text-align: center;">Com carinho,<br><b>Equipa Malala Store</b></p>
-        </div>
-      `
-    };
-
-    await transporter.sendMail(mailOptions);
-    console.log(`✉️ E-mail enviado com sucesso para ${emailCliente}`);
-  } catch (error) {
-    console.error("❌ Erro ao enviar e-mail:", error);
-  }
-}
-
 // ROTA 1: PIX
 app.post('/api/payments/pix', async (req, res) => {
   try {
@@ -127,7 +82,6 @@ app.post('/api/payments/pix', async (req, res) => {
 
     const stockValidation = await validateStockBeforeCheckout(items);
     if (!stockValidation.valid) {
-        console.warn(`⚠️ Venda PIX Bloqueada por falta de estoque: ${stockValidation.error}`);
         return res.status(409).json({ error: stockValidation.error });
     }
 
@@ -149,9 +103,7 @@ app.post('/api/payments/pix', async (req, res) => {
         createdAt: FieldValue.serverTimestamp()
       });
       orderId = orderRef.id;
-      console.log(`📦 [PIX] Pedido ${orderId} salvo no Firestore com sucesso!`);
     } catch (dbError) {
-      console.error('❌ Erro ao salvar pedido PIX no Firestore:', dbError);
       return res.status(500).json({ error: 'Falha ao registrar pedido no banco de dados.' });
     }
 
@@ -206,7 +158,6 @@ app.post('/api/payments/card', async (req, res) => {
 
     const stockValidation = await validateStockBeforeCheckout(items);
     if (!stockValidation.valid) {
-        console.warn(`⚠️ Venda de Cartão Bloqueada por falta de estoque: ${stockValidation.error}`);
         return res.status(409).json({ error: stockValidation.error });
     }
 
@@ -229,18 +180,11 @@ app.post('/api/payments/card', async (req, res) => {
         createdAt: FieldValue.serverTimestamp()
       });
       orderId = orderRef.id;
-      console.log(`📦 [CARTÃO] Pedido ${orderId} salvo no Firestore com sucesso!`);
-      
-      // Dispara o e-mail em segundo plano (sem "await" para não travar o carregamento da tela)
-      if (payer && payer.email) {
-        enviarEmailConfirmacao(payer.email, orderId, items);
-      }
-      
+      console.log(`📦 [CARTÃO] Pedido ${orderId} salvo e aprovado com sucesso!`);
     } catch (dbError) {
       return res.status(500).json({ error: 'Falha ao registrar pedido no banco de dados.' });
     }
 
-    // Resposta imediata para o botão do site avançar!
     res.status(200).json({ success: true, orderId: orderId, status: 'approved' });
   } catch (error) {
     console.error('❌ Erro geral na rota de Cartão:', error);
@@ -300,17 +244,11 @@ app.post('/api/webhooks/mercadopago', async (req, res) => {
             }
           }
 
-          // Dispara o e-mail em segundo plano
-          if (orderData.payer && orderData.payer.email) {
-            enviarEmailConfirmacao(orderData.payer.email, orderId, orderData.items);
-          }
-
         } else if (status === 'cancelled' || status === 'rejected') {
            await orderRef.update({
             status: 'Cancelado',
             updatedAt: FieldValue.serverTimestamp()
           });
-          console.log(`❌ [WEBHOOK] Pedido ${orderId} atualizado para Cancelado.`);
         }
       }
     }
