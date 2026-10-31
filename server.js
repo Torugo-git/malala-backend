@@ -161,9 +161,47 @@ app.post('/api/payments/pix', async (req, res) => {
         let orderId = 'ORD-' + Date.now();
 
         try {
+          // 1. Validate stock outside transaction to prevent fast-failing network calls
           const catalogRef = db.collection('malala_store').doc('catalog');
-          let paymentResponse;
+          const catalogPreSnap = await catalogRef.get();
+          if (!catalogPreSnap.exists || !catalogPreSnap.data().products) {
+            throw new Error("Catálogo não encontrado na nuvem.");
+          }
+          let preCatProducts = catalogPreSnap.data().products;
+          items.forEach(item => {
+            const p = preCatProducts.find(x => String(x.id) === String(item.id));
+            if (p && p.stock !== undefined && p.stock < item.quantity) {
+               throw new Error(`Estoque insuficiente para o produto: ${item.title}`);
+            }
+          });
+
+          // 2. Make the API call outside the transaction
+          const paymentData = {
+            body: {
+              transaction_amount: Number(totalAmount.toFixed(2)),
+              token: token,
+              description: `Pedido Malala Store #${orderId}`,
+              installments: parseInt(installments) || 1,
+              payment_method_id: payment_method_id,
+              payer: {
+                email: payer.email,
+                first_name: payer.first_name,
+                last_name: payer.last_name || 'Cliente',
+                identification: {
+                  type: payer.identification.type || 'CPF',
+                  number: payer.identification.number.replace(/\D/g, '')
+                }
+              }
+            }
+          };
+
+          let paymentResponse = await paymentClient.create(paymentData);
+
+          if (paymentResponse.status !== 'approved') {
+            throw new Error(`Pagamento recusado: ${paymentResponse.status_detail}`);
+          }
           
+          // 3. Atomically decrement stock
           await db.runTransaction(async (transaction) => {
             const catalogSnap = await transaction.get(catalogRef);
             if (!catalogSnap.exists || !catalogSnap.data().products) {
@@ -171,46 +209,14 @@ app.post('/api/payments/pix', async (req, res) => {
             }
 
             let catProducts = catalogSnap.data().products;
+            let changed = false;
 
             items.forEach(item => {
               const p = catProducts.find(x => String(x.id) === String(item.id));
               if (p && p.stock !== undefined) {
                 if (p.stock < item.quantity) {
-                   throw new Error(`Estoque insuficiente para o produto: ${item.title}`);
+                   throw new Error(`Estoque insuficiente após pagamento: ${item.title}`);
                 }
-              }
-            });
-
-            // Make the API call inside the transaction AFTER verifying stock but BEFORE updating it
-            const paymentData = {
-              body: {
-                transaction_amount: Number(totalAmount.toFixed(2)),
-                token: token,
-                description: `Pedido Malala Store #${orderId}`,
-                installments: parseInt(installments) || 1,
-                payment_method_id: payment_method_id,
-                payer: {
-                  email: payer.email,
-                  first_name: payer.first_name,
-                  last_name: payer.last_name || 'Cliente',
-                  identification: {
-                    type: payer.identification.type || 'CPF',
-                    number: payer.identification.number.replace(/\D/g, '')
-                  }
-                }
-              }
-            };
-
-            paymentResponse = await paymentClient.create(paymentData);
-
-            if (paymentResponse.status !== 'approved') {
-              throw new Error(`Pagamento recusado: ${paymentResponse.status_detail}`);
-            }
-
-            let changed = false;
-            items.forEach(item => {
-              const p = catProducts.find(x => String(x.id) === String(item.id));
-              if (p && p.stock !== undefined) {
                 p.stock = Math.max(0, p.stock - item.quantity);
                 changed = true;
               }
@@ -224,7 +230,7 @@ app.post('/api/payments/pix', async (req, res) => {
             }
           });
 
-          // Save order to DB outside the transaction
+          // 4. Save order to DB
           const orderRef = await db.collection('orders').add({
             payer: {
               name: payer.first_name + ' ' + (payer.last_name || ''),
