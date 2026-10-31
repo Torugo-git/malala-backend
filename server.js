@@ -151,46 +151,72 @@ app.post('/api/payments/pix', async (req, res) => {
 });
 
 // ROTA 2: CARTÃO DE CRÉDITO
-app.post('/api/payments/card', async (req, res) => {
-  try {
-    const { token, issuer_id, payment_method_id, installments, payer, items } = req.body;
-    if (!db) return res.status(500).json({ error: 'Erro interno: Banco de dados desconectado.' });
+    app.post('/api/payments/card', async (req, res) => {
+      try {
+        const { token, issuer_id, payment_method_id, installments, payer, items } = req.body;
+        if (!db) return res.status(500).json({ error: 'Erro interno: Banco de dados desconectado.' });
 
-    const stockValidation = await validateStockBeforeCheckout(items);
-    if (!stockValidation.valid) {
-        return res.status(409).json({ error: stockValidation.error });
-    }
+        const stockValidation = await validateStockBeforeCheckout(items);
+        if (!stockValidation.valid) {
+            return res.status(409).json({ error: stockValidation.error });
+        }
 
-    const totalAmount = items.reduce((acc, item) => acc + (parseFloat(item.price) * parseInt(item.quantity)), 0);
-    let orderId = 'ORD-' + Date.now();
+        const totalAmount = items.reduce((acc, item) => acc + (parseFloat(item.price) * parseInt(item.quantity)), 0);
+        let orderId = 'ORD-' + Date.now();
 
-    try {
-      const orderRef = await db.collection('orders').add({
-        payer: {
-          name: payer.first_name + ' ' + (payer.last_name || ''),
-          email: payer.email,
-          cpf: payer.identification ? payer.identification.number : '',
-          address: payer.address || req.body.shippingAddress || null
-        },
-        items,
-        totalAmount,
-        paymentMethod: 'credit_card',
-        installments: parseInt(installments) || 1,
-        status: 'Pago',
-        createdAt: FieldValue.serverTimestamp()
-      });
-      orderId = orderRef.id;
-      console.log(`📦 [CARTÃO] Pedido ${orderId} salvo e aprovado com sucesso!`);
-    } catch (dbError) {
-      return res.status(500).json({ error: 'Falha ao registrar pedido no banco de dados.' });
-    }
+        try {
+          const orderRef = await db.collection('orders').add({
+            payer: {
+              name: payer.first_name + ' ' + (payer.last_name || ''),
+              email: payer.email,
+              cpf: payer.identification ? payer.identification.number : '',
+              address: payer.address || req.body.shippingAddress || null
+            },
+            items,
+            totalAmount,
+            paymentMethod: 'credit_card',
+            installments: parseInt(installments) || 1,
+            status: 'Pago',
+            createdAt: FieldValue.serverTimestamp()
+          });
+          orderId = orderRef.id;
 
-    res.status(200).json({ success: true, orderId: orderId, status: 'approved' });
-  } catch (error) {
-    console.error('❌ Erro geral na rota de Cartão:', error);
-    res.status(500).json({ error: 'Falha ao processar cartão de crédito.' });
-  }
-});
+          // --- ADICIONAR ESTE BLOCO PARA BAIXAR O ESTOQUE NO FIRESTORE ---
+          const catalogRef = db.collection('malala_store').doc('catalog');
+          const catalogSnap = await catalogRef.get();
+          
+          if (catalogSnap.exists && catalogSnap.data().products) {
+            let catProducts = catalogSnap.data().products;
+            let changed = false;
+
+            items.forEach(item => {
+              const p = catProducts.find(x => String(x.id) === String(item.id));
+              if (p && p.stock !== undefined) {
+                p.stock = Math.max(0, p.stock - item.quantity);
+                changed = true;
+              }
+            });
+
+            if (changed) {
+              await catalogRef.update({
+                products: catProducts,
+                updatedAt: FieldValue.serverTimestamp()
+              });
+            }
+          }
+          // -------------------------------------------------------------
+
+          console.log(`📦 [CARTÃO] Pedido ${orderId} salvo, aprovado e estoque reduzido com sucesso!`);
+        } catch (dbError) {
+          return res.status(500).json({ error: 'Falha ao registrar pedido no banco de dados.' });
+        }
+
+        res.status(200).json({ success: true, orderId: orderId, status: 'approved' });
+      } catch (error) {
+        console.error('❌ Erro geral na rota de Cartão:', error);
+        res.status(500).json({ error: 'Falha ao processar cartão de crédito.' });
+      }
+    });
 
 // ROTA 3: WEBHOOK MERCADO PAGO
 app.post('/api/webhooks/mercadopago', async (req, res) => {
