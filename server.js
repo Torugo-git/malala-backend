@@ -183,27 +183,34 @@ app.post('/api/payments/pix', async (req, res) => {
 
           // --- ADICIONAR ESTE BLOCO PARA BAIXAR O ESTOQUE NO FIRESTORE ---
           const catalogRef = db.collection('malala_store').doc('catalog');
-          const catalogSnap = await catalogRef.get();
           
-          if (catalogSnap.exists && catalogSnap.data().products) {
+          await db.runTransaction(async (transaction) => {
+            const catalogSnap = await transaction.get(catalogRef);
+            if (!catalogSnap.exists || !catalogSnap.data().products) {
+              throw new Error("Catálogo não encontrado na nuvem.");
+            }
+
             let catProducts = catalogSnap.data().products;
             let changed = false;
 
             items.forEach(item => {
               const p = catProducts.find(x => String(x.id) === String(item.id));
               if (p && p.stock !== undefined) {
+                if (p.stock < item.quantity) {
+                   throw new Error(`Estoque insuficiente para o produto: ${item.title}`);
+                }
                 p.stock = Math.max(0, p.stock - item.quantity);
                 changed = true;
               }
             });
 
             if (changed) {
-              await catalogRef.update({
+              transaction.update(catalogRef, {
                 products: catProducts,
                 updatedAt: FieldValue.serverTimestamp()
               });
             }
-          }
+          });
           // -------------------------------------------------------------
 
           console.log(`📦 [CARTÃO] Pedido ${orderId} salvo, aprovado e estoque reduzido com sucesso!`);
@@ -247,28 +254,30 @@ app.post('/api/webhooks/mercadopago', async (req, res) => {
           });
 
           const catalogRef = db.collection('malala_store').doc('catalog');
-          const catalogSnap = await catalogRef.get();
           
-          if (catalogSnap.exists && catalogSnap.data().products) {
-            let catProducts = catalogSnap.data().products;
-            let changed = false;
+          await db.runTransaction(async (transaction) => {
+            const catalogSnap = await transaction.get(catalogRef);
+            if (catalogSnap.exists && catalogSnap.data().products) {
+              let catProducts = catalogSnap.data().products;
+              let changed = false;
 
-            orderData.items.forEach(item => {
-              const p = catProducts.find(x => String(x.id) === String(item.id));
-              if (p && p.stock !== undefined) {
-                p.stock = Math.max(0, p.stock - item.quantity);
-                changed = true;
-              }
-            });
-
-            if (changed) {
-              await catalogRef.update({
-                products: catProducts,
-                updatedAt: FieldValue.serverTimestamp()
+              orderData.items.forEach(item => {
+                const p = catProducts.find(x => String(x.id) === String(item.id));
+                if (p && p.stock !== undefined) {
+                  p.stock = Math.max(0, p.stock - item.quantity);
+                  changed = true;
+                }
               });
-              console.log(`✅ [WEBHOOK] Pedido ${orderId} aprovado e stock reduzido!`);
+
+              if (changed) {
+                transaction.update(catalogRef, {
+                  products: catProducts,
+                  updatedAt: FieldValue.serverTimestamp()
+                });
+              }
             }
-          }
+          });
+          console.log(`✅ [WEBHOOK] Pedido ${orderId} aprovado e stock reduzido!`);
 
         } else if (status === 'cancelled' || status === 'rejected') {
            await orderRef.update({
