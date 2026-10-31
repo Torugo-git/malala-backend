@@ -156,33 +156,13 @@ app.post('/api/payments/pix', async (req, res) => {
         const { token, issuer_id, payment_method_id, installments, payer, items } = req.body;
         if (!db) return res.status(500).json({ error: 'Erro interno: Banco de dados desconectado.' });
 
-        const stockValidation = await validateStockBeforeCheckout(items);
-        if (!stockValidation.valid) {
-            return res.status(409).json({ error: stockValidation.error });
-        }
 
         const totalAmount = items.reduce((acc, item) => acc + (parseFloat(item.price) * parseInt(item.quantity)), 0);
         let orderId = 'ORD-' + Date.now();
 
         try {
-          const orderRef = await db.collection('orders').add({
-            payer: {
-              name: payer.first_name + ' ' + (payer.last_name || ''),
-              email: payer.email,
-              cpf: payer.identification ? payer.identification.number : '',
-              address: payer.address || req.body.shippingAddress || null
-            },
-            items,
-            totalAmount,
-            paymentMethod: 'credit_card',
-            installments: parseInt(installments) || 1,
-            status: 'Pago',
-            createdAt: FieldValue.serverTimestamp()
-          });
-          orderId = orderRef.id;
-
-          // --- ADICIONAR ESTE BLOCO PARA BAIXAR O ESTOQUE NO FIRESTORE ---
           const catalogRef = db.collection('malala_store').doc('catalog');
+          let paymentResponse;
           
           await db.runTransaction(async (transaction) => {
             const catalogSnap = await transaction.get(catalogRef);
@@ -191,7 +171,6 @@ app.post('/api/payments/pix', async (req, res) => {
             }
 
             let catProducts = catalogSnap.data().products;
-            let changed = false;
 
             items.forEach(item => {
               const p = catProducts.find(x => String(x.id) === String(item.id));
@@ -199,6 +178,39 @@ app.post('/api/payments/pix', async (req, res) => {
                 if (p.stock < item.quantity) {
                    throw new Error(`Estoque insuficiente para o produto: ${item.title}`);
                 }
+              }
+            });
+
+            // Make the API call inside the transaction AFTER verifying stock but BEFORE updating it
+            const paymentData = {
+              body: {
+                transaction_amount: Number(totalAmount.toFixed(2)),
+                token: token,
+                description: `Pedido Malala Store #${orderId}`,
+                installments: parseInt(installments) || 1,
+                payment_method_id: payment_method_id,
+                payer: {
+                  email: payer.email,
+                  first_name: payer.first_name,
+                  last_name: payer.last_name || 'Cliente',
+                  identification: {
+                    type: payer.identification.type || 'CPF',
+                    number: payer.identification.number.replace(/\D/g, '')
+                  }
+                }
+              }
+            };
+
+            paymentResponse = await paymentClient.create(paymentData);
+
+            if (paymentResponse.status !== 'approved') {
+              throw new Error(`Pagamento recusado: ${paymentResponse.status_detail}`);
+            }
+
+            let changed = false;
+            items.forEach(item => {
+              const p = catProducts.find(x => String(x.id) === String(item.id));
+              if (p && p.stock !== undefined) {
                 p.stock = Math.max(0, p.stock - item.quantity);
                 changed = true;
               }
@@ -211,14 +223,38 @@ app.post('/api/payments/pix', async (req, res) => {
               });
             }
           });
-          // -------------------------------------------------------------
+
+          // Save order to DB outside the transaction
+          const orderRef = await db.collection('orders').add({
+            payer: {
+              name: payer.first_name + ' ' + (payer.last_name || ''),
+              email: payer.email,
+              cpf: payer.identification ? payer.identification.number : '',
+              address: payer.address || req.body.shippingAddress || null
+            },
+            items,
+            totalAmount,
+            paymentMethod: 'credit_card',
+            installments: parseInt(installments) || 1,
+            status: 'Pago',
+            mercadoPagoId: paymentResponse.id,
+            createdAt: FieldValue.serverTimestamp()
+          });
+          orderId = orderRef.id;
 
           console.log(`📦 [CARTÃO] Pedido ${orderId} salvo, aprovado e estoque reduzido com sucesso!`);
-        } catch (dbError) {
-          return res.status(500).json({ error: 'Falha ao registrar pedido no banco de dados.' });
-        }
+          res.status(200).json({ success: true, orderId: orderId, status: 'approved' });
 
-        res.status(200).json({ success: true, orderId: orderId, status: 'approved' });
+        } catch (dbError) {
+          console.error("Erro no processamento:", dbError);
+          if (dbError.message.includes('Pagamento recusado')) {
+            return res.status(400).json({ error: dbError.message, status_detail: dbError.message });
+          }
+          if (dbError.message.includes('Estoque insuficiente')) {
+             return res.status(409).json({ error: dbError.message });
+          }
+          return res.status(500).json({ error: 'Falha ao processar pagamento ou registrar pedido.' });
+        }
       } catch (error) {
         console.error('❌ Erro geral na rota de Cartão:', error);
         res.status(500).json({ error: 'Falha ao processar cartão de crédito.' });
