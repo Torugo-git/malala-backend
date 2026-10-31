@@ -228,6 +228,12 @@ app.post('/api/payments/card', async (req, res) => {
       });
       orderId = orderRef.id;
       console.log(`📦 [CARTÃO] Pedido ${orderId} salvo no Firestore com sucesso!`);
+      
+      // Dispara e-mail de confirmação para compras com cartão
+      if (payer && payer.email) {
+        await enviarEmailConfirmacao(payer.email, orderId, items);
+      }
+      
     } catch (dbError) {
       return res.status(500).json({ error: 'Falha ao registrar pedido no banco de dados.' });
     }
