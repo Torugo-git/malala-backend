@@ -12,9 +12,11 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
-// 0. CONFIGURAÇÃO DO CARTEIRO (NODEMAILER)
+// 0. CONFIGURAÇÃO DO CARTEIRO (NODEMAILER) - CORRIGIDO PARA EVITAR TIMEOUT
 const transporter = nodemailer.createTransport({
-  service: 'gmail',
+  host: 'smtp.gmail.com',
+  port: 465,
+  secure: true, // Usa SSL diretamente
   auth: {
     user: process.env.EMAIL_USER,
     pass: process.env.EMAIL_PASS
@@ -229,15 +231,16 @@ app.post('/api/payments/card', async (req, res) => {
       orderId = orderRef.id;
       console.log(`📦 [CARTÃO] Pedido ${orderId} salvo no Firestore com sucesso!`);
       
-      // Dispara e-mail de confirmação para compras com cartão
+      // Dispara o e-mail em segundo plano (sem "await" para não travar o carregamento da tela)
       if (payer && payer.email) {
-        await enviarEmailConfirmacao(payer.email, orderId, items);
+        enviarEmailConfirmacao(payer.email, orderId, items);
       }
       
     } catch (dbError) {
       return res.status(500).json({ error: 'Falha ao registrar pedido no banco de dados.' });
     }
 
+    // Resposta imediata para o botão do site avançar!
     res.status(200).json({ success: true, orderId: orderId, status: 'approved' });
   } catch (error) {
     console.error('❌ Erro geral na rota de Cartão:', error);
@@ -297,9 +300,9 @@ app.post('/api/webhooks/mercadopago', async (req, res) => {
             }
           }
 
-          // Dispara o e-mail de confirmação para o cliente após aprovação e baixa de stock
+          // Dispara o e-mail em segundo plano
           if (orderData.payer && orderData.payer.email) {
-            await enviarEmailConfirmacao(orderData.payer.email, orderId, orderData.items);
+            enviarEmailConfirmacao(orderData.payer.email, orderId, orderData.items);
           }
 
         } else if (status === 'cancelled' || status === 'rejected') {
